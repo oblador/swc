@@ -3820,6 +3820,59 @@ impl<I: Tokens> Parser<I> {
             return Ok(idx.into());
         }
 
+        // Flow indexer with a type expression as key: {[KeyType]: ValueType}
+        // This must come after try_parse_ts_index_signature so that
+        // {[name: Type]: V} is parsed as a standard index signature.
+        // Skip when the bracket contains a single word (e.g. {[string]: V}),
+        // which is handled later as a computed property.
+        // Also skip internal slots like {[[foo]]: V}.
+        if self.input().syntax().flow()
+            && self.input().is(Token::LBracket)
+            && !self.ts_look_ahead(|p| {
+                p.assert_and_bump(Token::LBracket);
+
+                // Skip internal slots: [[name]]
+                if p.input().is(Token::LBracket) {
+                    return true;
+                }
+
+                let is_word = p.input().cur().is_word();
+                if is_word {
+                    p.bump();
+                }
+                // Skip single-word indexers like [string] — handled as
+                // computed properties
+                is_word && p.input().is(Token::RBracket)
+            })
+        {
+            if let Some(indexer) = self.try_parse_ts(|p| {
+                let start = p.cur_pos();
+                expect!(p, Token::LBracket);
+                let _ = p.parse_ts_type()?;
+                expect!(p, Token::RBracket);
+
+                let optional = p.input_mut().eat(Token::QuestionMark);
+                let type_ann = Some(p.parse_ts_type_or_type_predicate_ann(Token::Colon)?);
+                p.parse_ts_type_member_semicolon()?;
+
+                Ok(Some(TsTypeElement::TsPropertySignature(
+                    TsPropertySignature {
+                        span: p.span(start),
+                        computed: false,
+                        readonly,
+                        key: Box::new(Expr::Ident(Ident::new_no_ctxt(
+                            atom!("__flow_indexer"),
+                            p.span(start),
+                        ))),
+                        optional,
+                        type_ann,
+                    },
+                )))
+            }) {
+                return Ok(indexer);
+            }
+        }
+
         if let Some(v) = self.try_parse_ts(|p| {
             let start = p.input().cur_pos();
 
